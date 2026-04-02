@@ -1,0 +1,154 @@
+version: '3.8'
+
+services:
+  # Infrastructure
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: network_traffic
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Microservices
+  data-ingestion:
+    build:
+      context: ./services/data-ingestion
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: network_traffic
+      DB_USER: postgres
+      DB_PASSWORD: password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      PORT: 5000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./datasets:/app/datasets
+
+  forecasting-agent:
+    build:
+      context: ./services/forecasting-agent
+      dockerfile: Dockerfile
+    ports:
+      - "5001:5001"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: network_traffic
+      DB_USER: postgres
+      DB_PASSWORD: password
+      PORT: 5001
+    depends_on:
+      postgres:
+        condition: service_healthy
+      data-ingestion:
+        condition: service_started
+
+  alert-agent:
+    build:
+      context: ./services/alert-agent
+      dockerfile: Dockerfile
+    ports:
+      - "5002:5002"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: network_traffic
+      DB_USER: postgres
+      DB_PASSWORD: password
+      PORT: 5002
+    depends_on:
+      postgres:
+        condition: service_healthy
+      data-ingestion:
+        condition: service_started
+
+  llama-stack-agent:
+    build:
+      context: ./services/llama-stack-agent
+      dockerfile: Dockerfile
+    ports:
+      - "5003:5003"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: network_traffic
+      DB_USER: postgres
+      DB_PASSWORD: password
+      PORT: 5003
+      DATA_INGESTION_URL: http://data-ingestion:5000
+      FORECASTING_URL: http://forecasting-agent:5001
+      ALERTS_URL: http://alert-agent:5002
+    depends_on:
+      postgres:
+        condition: service_healthy
+      data-ingestion:
+        condition: service_started
+      forecasting-agent:
+        condition: service_started
+      alert-agent:
+        condition: service_started
+
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      DATA_INGESTION_URL: http://data-ingestion:5000
+      FORECASTING_URL: http://forecasting-agent:5001
+      ALERTS_URL: http://alert-agent:5002
+      LLAMA_STACK_URL: http://llama-stack-agent:5003
+      JWT_SECRET: jwt-secret-key-for-development
+      SECRET_KEY: flask-secret-key-for-development
+    depends_on:
+      data-ingestion:
+        condition: service_started
+      forecasting-agent:
+        condition: service_started
+      alert-agent:
+        condition: service_started
+      llama-stack-agent:
+        condition: service_started
+
+  # Optional: Llama Stack for local development
+  llama-stack:
+    image: llamastack/distribution-ollama:latest
+    ports:
+      - "8321:8321"
+    environment:
+      OLLAMA_URL: http://host.docker.internal:11434
+    profiles:
+      - llama-stack
+
+volumes:
+  postgres_data:
